@@ -1,0 +1,10 @@
+#background
+samba 超大组存在低性能问题,主要在 ldb_match_equality 中加入了guid比较和二分查找来优化，
+但是为了减少源码的改动，采用动态库劫持技术来劫持这个函数。
+
+#调研
+root@debug:/usr/local/samba/lib/private# nm libldb-private-samba.so | grep ldb_match_equality
+0000000000020be9 t ldb_match_equality
+root@debug:/usr/local/samba/lib/private#
+
+这个库中含有static 定义的函数，T 是导出函数

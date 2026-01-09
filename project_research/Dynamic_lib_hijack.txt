@@ -8,3 +8,94 @@ root@debug:/usr/local/samba/lib/private# nm libldb-private-samba.so | grep ldb_m
 root@debug:/usr/local/samba/lib/private#
 
 这个库中含有static 定义的函数，T 是导出函数
+
+#困难点
+1、动态库加载后如何关闭句柄
+	用_attribute_((destructor))
+	缓存句柄
+
+动态库预先加载有几个技术点：
+1、预先加载的动态库关闭句柄问题，会不会有内存泄漏
+2、动态库劫持，启动的命令是samba 的话，可以劫持到其他进程也使用到这个库的子进程吗？还需要调研
+3、采用系统级的预加载会有什么问题，会不会导致动态库因为句柄无法释放常驻内存呢？如何合理的采用系统级的预先加载，不会导致劫持出现问题。
+
+动态库预加载的知识：
+LD_PRELOAD=/path/to/libfoo.so ./your_program
+预先加载的动态库的内存行为：
+1、程序启动的时候立即加载
+2、整个程序的生命周期都存在
+3、不可调用dlclose卸载预加载的动态库
+
+动态加载对比：
+void *handle = dlopen()
+dlcose(hand) ---> 可以手动卸载
+
+动态库加载时，内存驻留的关键因素：
+1、引用计数
+2、加载标记  RTLD_GLOBAL 使符号表全局可见，可能影响卸载
+void *handle = dlopen(".so", RTLD_LAZY | RTLD_GLOBAL)
+3、依赖关系
+
+
+###### RTLD_GLOBAL #########
+1、其他库可以直接引用这个库的符号
+在其他动态库中直接：
+extern void func()
+直接使用，然后编译为动态库，不需要依赖核心动态库，但是卸载困难，必须先卸载依赖他的库才能在卸载他, 卸载就是引用计数的减少。
+
+
+###### /etc/ld.so.preload ##########
+echo "/usr/lib/libmonitor.so" >> /etc/ld.so.preload
+
+核心问题：
+1、不需要的库也会被加载，如ls ps data
+2、对内存的浪费 ----> 假设.so 的大小是1MB, 运行100个程序，那么虚拟内存是100M
+ 代码段可能共享但是数据段每个进程独立
+3、启动延迟  每次程序都要打开库文件-映射到内存-执行构造函数-符号解析
+4、资源消耗  文件描述符（每个进程一个),页表项，cpu缓存污染
+
+
+替换方案：
+1、优先使用LD_PRELOAD 环境变量
+2、考虑针对性方案：systemd 服务、包装脚本
+[Service]
+Environment="LD_PRELOAD=/usr/lib/mylib.so"
+Execstart=/usr/bin/myapp
+
+#!/bin/bash
+export LD_PRELOAD=/usr/lib/mylib.so
+exec /usr/bin/myapp "$@"
+
+
+########### dlopen 优点对比 #####################
+不编译链接也能使用动态库、完全控制、可选功能、热更新、需要自己管理生命周期
+
+
+
+
+####### 运行时找不到动态库解决办法 ##############
+# 编译库
+gcc -fPIC -shared -o libmylib.so mylib.c
+
+# 编译程序
+gcc -o test test.c -L. -lmylib
+
+# 运行
+./test
+# 错误：error while loading shared libraries: libmylib.so: cannot open shared object file: No such file or directory
+
+1、LD_LIBRARY_PATH 变量
+echo 'export LD_LIBRARY_PATH=/path/to/lib:$LD_LIBRARY_PATH'
+source ~/.bashrc
+
+2、复制到系统目录（不推荐，容易冲突）
+cp libmylib.so /usr/local/lib/
+sudo ldconfig #更新缓存
+
+cp libmmylib.so /usr/lib/
+sudo ldconfig
+
+3、在编译时嵌入运行时搜索路径
+gcc -o myapp myapp.c -L/path/to/libs -lmylib -Wl,-rpath,/path/to/libs
+#示例
+gcc -o test test.c -L. -lmylib -Wl,-rpath,.
